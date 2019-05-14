@@ -27,7 +27,7 @@ class mys2mqtt:
 
         # Attempt to load existing configuration (node-id)
         try:
-            with open('mys.json', 'r') as f:
+            with open('mys2mqtt.config.json', 'r') as f:
                 config = json.load(f)
                 self.node_id = config['node-id']
                 print("Loaded node ID: {}".format(self.node_id))
@@ -36,7 +36,7 @@ class mys2mqtt:
             config = {  
                 'node-id': 255 # 255 indicate that we have no ID, we will request one and store the one received
             }
-            with open('mys.json', 'w') as outfile:  
+            with open('mys2mqtt.config.json', 'w') as outfile:
                 json.dump(config, outfile)
 
         self.has_node_id = False if self.node_id == 255 else True
@@ -56,7 +56,7 @@ class mys2mqtt:
             'node-id': int(message.payload, 10)
         }
         # TODO: Handle merging of existing configuration
-        with open('mys.json', 'w') as outfile:  
+        with open('mys2mqtt.config.json', 'w') as outfile:
             json.dump(config, outfile)
         self.node_id = config['node-id']
         print("Received a new node ID: {}".format(self.node_id))
@@ -71,29 +71,6 @@ class mys2mqtt:
         if rc == 0:
             print("Connected to broker")
             self.mqtt.connected_flag = True
-
-            # Request a node ID from the controller if not known
-            if not self.has_node_id:
-                self.mqtt.message_callback_add(self.__mys2topic_in(0, c.C_INTERNAL, c.I_ID_RESPONSE), self.__handle_id_response)
-                time.sleep(1) # TODO: Figure out why this appear to be necessary
-                self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_ID_REQUEST))
-            else:
-                # Register callbacks to commands we can handle sine we know our ID
-                self.__register_subscription_callbacks()
-                
-            # Subscribe to controller output targetting us
-            self.mqtt.subscribe("mys-out/"+str(self.node_id)+"/#")
-
-            # Provide information about this node
-            self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_SKETCH_NAME), self.sketch_name)
-            self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_SKETCH_VERSION), self.sketch_version)
-
-            # Present all registered nodes/children
-            for i in self.sensor_list:
-                self.mqtt.publish(self.__mys2topic_out(i[0], c.C_PRESENTATION, i[1]))
-
-            # Send request for configuration (metric/imperial units)
-            self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_CONFIG))
 
         else:
             self.mqtt.bad_connection_flag = True
@@ -130,6 +107,33 @@ class mys2mqtt:
         if self.mqtt.bad_connection_flag:
             self.mqtt.loop_stop()
             sys.exit()
+
+        # Request a node ID from the controller if not known
+        if not self.has_node_id:
+            self.mqtt.message_callback_add(self.__mys2topic_in(0, c.C_INTERNAL, c.I_ID_RESPONSE), self.__handle_id_response)
+            self.mqtt.subscribe("mys-out/255/#") # Subscribe to broadcasts until we have a node ID
+            self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_ID_REQUEST))
+            # Wait for us to get the node ID
+            while not self.has_node_id:
+                time.sleep(3)
+            self.mqtt.unsubscribe("mys-out/255/#") # Stop subscribing to broadcasts as we have a node ID
+
+        # Register callbacks to commands we can handle sine we know our ID
+        self.__register_subscription_callbacks()
+
+        # Subscribe to controller output targetting us
+        self.mqtt.subscribe("mys-out/"+str(self.node_id)+"/#")
+
+        # Provide information about this node
+        self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_SKETCH_NAME), self.sketch_name)
+        self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_SKETCH_VERSION), self.sketch_version)
+
+        # Present all registered nodes/children
+        for i in self.sensor_list:
+            self.mqtt.publish(self.__mys2topic_out(i[0], c.C_PRESENTATION, i[1]))
+
+        # Send request for configuration (metric/imperial units)
+        self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_CONFIG))
 
     def register_sensor(self, sensor_id, sensor):
         "Register a sensor which will be presented when broker is connected. sensor is a tuple with an S-type and a V-type."
