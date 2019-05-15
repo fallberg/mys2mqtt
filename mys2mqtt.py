@@ -50,6 +50,7 @@ class mys2mqtt:
 
     def __register_subscription_callbacks(self):
         self.mqtt.message_callback_add(self.__mys2topic_in('+', c.C_INTERNAL, c.I_REBOOT), self.__handle_reboot)
+        self.mqtt.message_callback_add(self.__mys2topic_in('+', c.C_INTERNAL, c.I_CONFIG), self.__handle_config)
 
     def __handle_id_response(self, client, userdata, message):
         config = {
@@ -63,9 +64,12 @@ class mys2mqtt:
         self.has_node_id = True
 
     def __handle_reboot(self, client, userdata, message):
-        print("Received reboot message")
         # TODO: How to handle non-linux hosts, and are there better ways than 'sudo'?
         os.system('sudo reboot')
+
+    def __handle_config(self, client, userdata, message):
+        self.has_config = True
+        self.imperial_format = True if (message.payload == b'I') else False
 
     def __on_connect(self, client, userdata, flags, rc):
         if rc == 0:
@@ -92,7 +96,7 @@ class mys2mqtt:
         self.mqtt.connected_flag = False
 
     def __on_message(self, client, userdata, message):
-        print("Received message to forward '" + str(message.payload) + "' on topic '"+ message.topic + "' with QoS " + str(message.qos))
+        print("Received message without handler '" + str(message.payload) + "' on topic '"+ message.topic + "' with QoS " + str(message.qos))
 
     def connect(self):
         "Connects to the broker and starts processing callbacks"
@@ -111,18 +115,18 @@ class mys2mqtt:
         # Request a node ID from the controller if not known
         if not self.has_node_id:
             self.mqtt.message_callback_add(self.__mys2topic_in(0, c.C_INTERNAL, c.I_ID_RESPONSE), self.__handle_id_response)
-            self.mqtt.subscribe("mys-out/255/#") # Subscribe to broadcasts until we have a node ID
+            self.mqtt.subscribe("{}/255/#".format(self.root_topic_in)) # Subscribe to broadcasts until we have a node ID
             self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_ID_REQUEST))
             # Wait for us to get the node ID
             while not self.has_node_id:
                 time.sleep(3)
-            self.mqtt.unsubscribe("mys-out/255/#") # Stop subscribing to broadcasts as we have a node ID
+            self.mqtt.unsubscribe("{}/255/#".format(self.root_topic_in)) # Stop subscribing to broadcasts as we have a node ID
 
         # Register callbacks to commands we can handle sine we know our ID
         self.__register_subscription_callbacks()
 
         # Subscribe to controller output targetting us
-        self.mqtt.subscribe("mys-out/"+str(self.node_id)+"/#")
+        self.mqtt.subscribe("{}/{}/#".format(self.root_topic_in, self.node_id))
 
         # Provide information about this node
         self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_SKETCH_NAME), self.sketch_name)
@@ -132,19 +136,29 @@ class mys2mqtt:
         for i in self.sensor_list:
             self.mqtt.publish(self.__mys2topic_out(i[0], c.C_PRESENTATION, i[1]))
 
-        # Send request for configuration (metric/imperial units)
-        self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_CONFIG))
+        # Send our battery level. Since we run python, it is pretty safe to assume battery is at maximum
+        self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_BATTERY_LEVEL), "100")
 
     def register_sensor(self, sensor_id, sensor):
         "Register a sensor which will be presented when broker is connected. sensor is a tuple with an S-type and a V-type."
-        self.sensor_list.append((str(sensor_id), str(sensor[0]), str(sensor[1])))
+        self.sensor_list.append((sensor_id, sensor[0], sensor[1]))
 
-    def use_imperial(self):
-        "Returns true if configuration has been received and indicate imperial units (default is metric)"
-        if self.has_config and self.imperial_format:
-            return True
-        else:
-            return False
+    def get_metric(self):
+        "Returns true if controller is set to metric units, false if controller is set to imperial units"
+        self.has_config = False
+
+        # Send request for configuration (metric/imperial units)
+        self.mqtt.publish(self.__mys2topic_out(0, c.C_INTERNAL, c.I_CONFIG))
+
+        # Wait for a reply with the configuration
+        while not self.has_config:
+            time.sleep(1)
+
+        return False if self.imperial_format else True    
+
+    def send_debug(self, sensor_id, data):
+        "Send a debug message to the controller"
+        self.mqtt.publish(self.__mys2topic_out(sensor_id, c.C_INTERNAL, c.I_LOG_MESSAGE), data)
 
     def send_float(self, sensor_id, value):
         "Send data for provided sensor ID in float form"
